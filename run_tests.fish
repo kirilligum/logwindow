@@ -2,20 +2,20 @@
 
 # Test runner for logwindow
 
-set -l EXIT_CODE 0
-set -l TOTAL_TESTS 0
-set -l PASSED_TESTS 0
+set -g EXIT_CODE 0
+set -g TOTAL_TESTS 0
+set -g PASSED_TESTS 0
 
 # --- Colors ---
-set -l normal (set_color normal)
-set -l red (set_color red)
-set -l green (set_color green)
-set -l yellow (set_color yellow)
+set -g normal (set_color normal)
+set -g red (set_color red)
+set -g green (set_color green)
+set -g yellow (set_color yellow)
 
 # --- Setup ---
-set -l BINARY "./logwindow"
+set -g BINARY "./logwindow"
 # Use mktemp to avoid race conditions and create a secure temp dir
-set -l TEST_DIR (mktemp -d -t logwindow_tests.XXXXXX)
+set -g TEST_DIR (mktemp -d -t logwindow_tests.XXXXXX)
 
 function cleanup
     echo ""
