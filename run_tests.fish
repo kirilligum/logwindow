@@ -69,15 +69,17 @@ echo "Test directory created at $TEST_DIR"
 # --- Test Cases ---
 
 function test_basic_truncation
-    set -l test_name "Basic truncation"
+    set -l test_name "Basic truncation (line-based)"
     set -l log_file "$TEST_DIR/basic.log"
     set -l max_size 15
 
+    # With line-based truncation, "line 1\n" should be dropped.
     set -l input "line 1\nline 2\nline 3\n"
-    set -l expected (echo -n $input | tail -c $max_size)
+    set -l expected "line 2\nline 3\n"
+    set -l expected_size (echo -n -- $expected | wc -c)
 
     # The program waits for stdin to close before the final write
-    echo -n $input | $BINARY $log_file --max-size $max_size >/dev/null 2>&1
+    echo -n -- $input | $BINARY $log_file --max-size $max_size >/dev/null 2>&1
 
     if not test -f $log_file
         fail_test "$test_name: Log file was not created"
@@ -93,11 +95,11 @@ function test_basic_truncation
         echo "Actual:   '$actual'"
     end
 
-    set -l actual_size (string length --bytes $actual)
-    if test $actual_size -eq $max_size
+    set -l actual_size (echo -n -- $actual | wc -c)
+    if test "$actual_size" -eq "$expected_size"
         pass_test "$test_name: size is correct"
     else
-        fail_test "$test_name: size ($actual_size) is not equal to max_size ($max_size)"
+        fail_test "$test_name: size ($actual_size) is not equal to expected size ($expected_size)"
     end
 end
 

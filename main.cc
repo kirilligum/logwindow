@@ -84,9 +84,16 @@ int main(int argc, char *argv[]) {
     buffer += line;
     buffer += '\n';
 
-    // Truncate to last maxSize characters
-    if (buffer.size() > config.maxSize) {
-      buffer = buffer.substr(buffer.size() - config.maxSize);
+    // Truncate by removing lines from the beginning
+    while (buffer.size() > config.maxSize) {
+      size_t first_newline = buffer.find('\n');
+      if (first_newline == std::string::npos) {
+        // Only one long line left, so truncate it by bytes
+        buffer.erase(0, buffer.size() - config.maxSize);
+        break;
+      }
+      // Erase the first line including its newline character
+      buffer.erase(0, first_newline + 1);
     }
 
     if (config.immediate) {
