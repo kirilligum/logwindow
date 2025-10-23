@@ -1,6 +1,6 @@
 # logwindow
 
-A fast, lightweight log truncation tool that maintains a rolling window of the most recent log data. Perfect for keeping logs readable and manageable during development, especially when working with AI coding assistants like Claude Code or Aider that need concise context.
+A fast, lightweight log truncation tool that maintains a rolling window of the most recent log data. **Designed specifically for AI coding assistants like Claude Code and Aider** - keep your Firebase emulator, dev server, and test logs within the AI's context window while getting real-time updates.
 
 ## Features
 
@@ -166,12 +166,236 @@ tail -f react.log
 ./long-running-build.sh 2>&1 | logwindow build.log --max-size 51200
 ```
 
+## Using with AI Coding Assistants
+
+### Claude Code Workflow
+
+Claude Code can read log files to debug issues, but long logs cause context overflow. `logwindow` keeps logs within Claude's context window.
+
+#### Complete Workflow Example
+
+```bash
+# 1. Start your services with logwindow
+firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
+yarn dev 2>&1 | logwindow dev-server.log --max-size 8000 &
+
+# 2. In Claude Code, ask it to work on your code
+# "Add a new cloud function to handle user registration and write tests"
+
+# 3. When tests fail, tell Claude where to look
+# "The test failed. Check firebase.log to see what the emulator is reporting"
+
+# 4. Claude reads firebase.log and sees only the recent 8KB
+# It provides better debugging suggestions based on actual errors
+
+# 5. Clean up when done
+pkill -f "firebase emulators"
+pkill -f "yarn dev"
+pkill -f logwindow
+```
+
+#### Shell Helper Functions
+
+**Fish shell** (`~/.config/fish/config.fish`):
+
+```fish
+function start-dev-with-logs
+    firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
+    yarn dev 2>&1 | logwindow dev-server.log --max-size 8000 &
+
+    echo "✓ Started with log windows:"
+    echo "  firebase.log (8KB window)"
+    echo "  dev-server.log (8KB window)"
+    echo ""
+    echo "Tell Claude Code: 'Check firebase.log for errors'"
+end
+
+function stop-dev-logs
+    pkill -f "firebase emulators"
+    pkill -f "yarn dev"
+    pkill -f logwindow
+    echo "✓ Stopped all dev processes"
+end
+```
+
+**Bash/Zsh** (`~/.bashrc` or `~/.zshrc`):
+
+```bash
+start-dev-with-logs() {
+    firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
+    yarn dev 2>&1 | logwindow dev-server.log --max-size 8000 &
+
+    echo "✓ Started with log windows:"
+    echo "  firebase.log (8KB window)"
+    echo "  dev-server.log (8KB window)"
+    echo ""
+    echo "Tell Claude Code: 'Check firebase.log for errors'"
+}
+
+stop-dev-logs() {
+    pkill -f "firebase emulators"
+    pkill -f "yarn dev"
+    pkill -f logwindow
+    echo "✓ Stopped all dev processes"
+}
+```
+
+#### Tips for Claude Code
+
+1. **Keep log files in your project root** - easier for Claude to find
+   ```bash
+   # Good
+   firebase emulators:start 2>&1 | logwindow ./firebase.log &
+
+   # Avoid
+   firebase emulators:start 2>&1 | logwindow /tmp/logs/firebase.log &
+   ```
+
+2. **Use descriptive filenames**
+   ```bash
+   logwindow firestore-emulator.log  # Clear
+   logwindow auth-emulator.log       # Clear
+   logwindow output.log              # Ambiguous
+   ```
+
+3. **Tell Claude explicitly about log locations**
+   ```
+   "The Firestore emulator logs are in firestore-emulator.log.
+   Run the test and check that file if anything fails."
+   ```
+
+4. **Adjust size based on error verbosity**
+   ```bash
+   # Verbose stack traces
+   logwindow app.log --max-size 16000
+
+   # Terse errors
+   logwindow app.log --max-size 4000
+   ```
+
+### Aider Workflow
+
+Aider automatically re-reads files before each LLM call, making it perfect for tracking live logs.
+
+#### Complete Workflow Example
+
+```bash
+# Terminal 1: Start emulator with logwindow
+firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
+
+# Terminal 2: Start aider
+aider
+
+# In aider: Add your source files and the log file
+/add src/functions/users.js
+/add firebase.log
+
+# Now work normally
+"Add a cloud function to delete user data"
+
+# Run your tests
+/run npm test
+
+# If test fails, ask about the logs
+"Check firebase.log - what error is the emulator showing?"
+
+# Aider automatically reads the CURRENT firebase.log (last 8KB)
+# It can now debug based on actual emulator output
+```
+
+#### Key Points for Aider
+
+✅ **Aider re-reads files before each LLM call** - You get updated logs automatically
+
+✅ **No need to re-add** - Once added with `/add`, aider tracks the file
+
+✅ **logwindow keeps updating the file** - As new logs come in, old ones are discarded
+
+✅ **Fresh context every time** - Each aider query sees the current log state
+
+#### Multiple Log Files with Aider
+
+```bash
+# Start multiple services
+firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
+yarn dev 2>&1 | logwindow dev-server.log --max-size 8000 &
+
+# In aider, add all relevant files
+/add src/app.js
+/add firebase.log
+/add dev-server.log
+
+# Ask about any log
+"What errors are in firebase.log?"
+"What's the latest request in dev-server.log?"
+```
+
+#### Managing Context Window in Aider
+
+If logs take too much context:
+
+```bash
+# Option 1: Smaller log window
+logwindow firebase.log --max-size 4000
+
+# Option 2: Remove log file when not needed
+/drop firebase.log
+
+# Option 3: Add logs only when debugging
+# Don't /add by default, only when you need to debug
+```
+
+#### Aider Pro Tips
+
+**1. Add logs only when debugging**
+```bash
+# Normal workflow - no logs
+/add src/functions.js
+
+# When test fails - add logs temporarily
+/add firebase.log
+"What went wrong in the last test run?"
+
+# After fixing - remove logs to save context
+/drop firebase.log
+```
+
+**2. Use descriptive filenames**
+```bash
+logwindow firestore_emulator.log
+logwindow auth_emulator.log
+
+# Then in aider
+"Check firestore_emulator.log for the query error"
+```
+
+**3. Check what's in context**
+```bash
+/ls  # Shows all files aider is tracking, including log files
+```
+
+### Why Not Just Use `tail`?
+
+```bash
+# This doesn't work for AI assistants:
+tail -f firebase.log
+
+# Because:
+# 1. tail -f doesn't limit file size - logs grow indefinitely
+# 2. tail -c truncates ONCE, not continuously
+# 3. No way to pipe output through tail and get a readable file
+# 4. AI tools need a static file they can read, not a live stream
+```
+
+`logwindow` solves all these issues by maintaining a continuously-updated file with a fixed maximum size.
+
 ## Configuration recommendations
 
 | Use case            | `--max-size` | `--write-interval`   |
 | ------------------- | ------------ | -------------------- |
 | Claude Code (free)  | 8000         | 1000                 |
 | Claude Pro/Extended | 16000-32000  | 1000                 |
+| Aider               | 4000-8000    | 1000                 |
 | Real-time debugging | 8000         | 500 or `--immediate` |
 | Low I/O systems     | 16000        | 2000                 |
 | High-volume logs    | 32000+       | 500                  |
@@ -202,7 +426,7 @@ MIT License - see LICENSE file for details
 
 ## Author
 
-Created for developers who use AI coding assistants and need clean, manageable logs.
+Created for developers using **Claude Code, Aider, and other AI coding assistants** who need to keep Firebase emulator logs, dev server logs, and test output within the AI's context window.
 
 ## Changelog
 
