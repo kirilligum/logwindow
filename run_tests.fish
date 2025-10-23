@@ -54,8 +54,8 @@ echo "Starting logwindow tests..."
 
 # 1. Compile the binary
 echo "Compiling..."
-# Assuming file is logwindow.cpp as per README
-clang++ -std=c++20 -Wall -Wextra -pedantic -o $BINARY logwindow.cpp
+# Assuming file is main.cc
+clang++ -std=c++20 -Wall -Wextra -pedantic -o $BINARY main.cc
 if not test $status -eq 0
     echo "$red[ERROR]$normal Compilation failed. Aborting tests."
     exit 1

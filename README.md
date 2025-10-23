@@ -31,10 +31,10 @@ git clone https://github.com/yourusername/logwindow.git
 cd logwindow
 
 # Compile
-clang++ -std=c++20 -O3 -o logwindow logwindow.cpp
+clang++ -std=c++20 -O3 -o logwindow main.cc
 
 # Or with GCC
-g++ -std=c++20 -O3 -o logwindow logwindow.cpp
+g++ -std=c++20 -O3 -o logwindow main.cc
 
 # Install (optional)
 sudo cp logwindow /usr/local/bin/
