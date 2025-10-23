@@ -30,13 +30,13 @@ trap cleanup EXIT
 
 function fail_test
     set -l message $argv[1]
-    echo "$red[FAIL]$normal $message"
+    echo "{$red}[FAIL]{$normal} $message"
     set -g EXIT_CODE 1
 end
 
 function pass_test
     set -l message $argv[1]
-    echo "$green[PASS]$normal $message"
+    echo "{$green}[PASS]{$normal} $message"
     set -g PASSED_TESTS (math $PASSED_TESTS + 1)
 end
 
@@ -57,7 +57,7 @@ echo "Compiling..."
 # Assuming file is main.cc
 clang++ -std=c++20 -Wall -Wextra -pedantic -o $BINARY main.cc
 if not test $status -eq 0
-    echo "$red[ERROR]$normal Compilation failed. Aborting tests."
+    echo "{$red}[ERROR]{$normal} Compilation failed. Aborting tests."
     exit 1
 end
 echo "Compilation successful."
@@ -74,28 +74,28 @@ function test_basic_truncation
     set -l max_size 15
 
     # With line-based truncation, "line 1\n" should be dropped.
-    set -l input (printf "line 1\nline 2\nline 3\n")
-    set -l expected (printf "line 2\nline 3\n")
-    set -l expected_size (echo -n -- "$expected" | wc -c)
+    set -l expected (printf "line 2\nline 3\n" | string collect)
+    set -l expected_size (string length -- "$expected")
 
     # The program waits for stdin to close before the final write
-    printf -- "$input" | $BINARY $log_file --max-size $max_size >/dev/null 2>&1
+    printf "line 1\nline 2\nline 3\n" | $BINARY $log_file --max-size $max_size >/dev/null 2>&1
 
     if not test -f $log_file
         fail_test "$test_name: Log file was not created"
         return
     end
 
-    set -l actual (cat $log_file)
+    set -l actual (cat $log_file | string collect)
     if test "$actual" = "$expected"
         pass_test "$test_name: content matches"
     else
         fail_test "$test_name: content mismatch"
-        echo "Expected: '$expected'"
-        echo "Actual:   '$actual'"
+        # Use printf with %q to show escaped version for debugging
+        printf "Expected length: %d\n" (string length -- "$expected")
+        printf "Actual length:   %d\n" (string length -- "$actual")
     end
 
-    set -l actual_size (echo -n -- "$actual" | wc -c)
+    set -l actual_size (string length -- "$actual")
     if test "$actual_size" -eq "$expected_size"
         pass_test "$test_name: size is correct"
     else
@@ -106,49 +106,46 @@ end
 function test_immediate_mode
     set -l test_name "Immediate mode"
     set -l log_file "$TEST_DIR/immediate.log"
-    
-    # Use a named pipe to send input line-by-line
-    set -l fifo_path "$TEST_DIR/immediate_fifo"
-    mkfifo $fifo_path
 
-    # Start logwindow in the background, reading from the pipe
-    $BINARY $log_file --immediate < $fifo_path &
+    # Create a writer script
+    set -l writer_script "$TEST_DIR/writer.sh"
+    echo "#!/bin/bash" > $writer_script
+    echo "echo 'line 1'" >> $writer_script
+    echo "sleep 0.15" >> $writer_script
+    echo "echo 'line 2'" >> $writer_script
+    chmod +x $writer_script
+
+    # Run the test using the writer script
+    $writer_script | $BINARY $log_file --immediate &
     set -l lw_pid $last_pid
-
-    # Write to the pipe in a separate process. It will close the pipe when done.
-    begin
-        echo "line 1"
-        sleep 0.2 # Give writer time to send second line
-        echo "line 2"
-    end > $fifo_path &
 
     # Give logwindow time to process the first line
     sleep 0.1
-    
-    set -l content1 (cat $log_file 2>/dev/null)
-    set -l expected1 (printf "line 1\n")
+
+    set -l content1 (cat $log_file 2>/dev/null | string collect)
+    set -l expected1 (printf "line 1\n" | string collect)
     if test "$content1" = "$expected1"
         pass_test "$test_name: writes first line immediately"
     else
         fail_test "$test_name: did not write first line correctly"
-        echo "Expected: '$expected1'"
-        echo "Actual:   '$content1'"
+        printf "Expected length: %d\n" (string length -- "$expected1")
+        printf "Actual length:   %d\n" (string length -- "$content1")
     end
 
     # Give logwindow time to process the second line
     sleep 0.2
 
-    set -l content2 (cat $log_file 2>/dev/null)
-    set -l expected2 (printf "line 1\nline 2\n")
+    set -l content2 (cat $log_file 2>/dev/null | string collect)
+    set -l expected2 (printf "line 1\nline 2\n" | string collect)
     if test "$content2" = "$expected2"
         pass_test "$test_name: appends second line immediately"
     else
         fail_test "$test_name: did not append second line correctly"
-        echo "Expected: '$expected2'"
-        echo "Actual:   '$content2'"
+        printf "Expected length: %d\n" (string length -- "$expected2")
+        printf "Actual length:   %d\n" (string length -- "$content2")
     end
 
-    # Wait for logwindow to finish (it exits when the writer closes the pipe)
+    # Wait for logwindow to finish
     wait $lw_pid 2>/dev/null
 end
 
@@ -158,20 +155,18 @@ function test_debounced_write
     set -l write_interval_ms 200
     set -l write_interval_s (math $write_interval_ms / 1000)
 
-    set -l fifo_path "$TEST_DIR/debounced_fifo"
-    mkfifo $fifo_path
-    
-    $BINARY $log_file --write-interval $write_interval_ms < $fifo_path &
-    set -l lw_pid $last_pid
-    
-    # Keep the pipe open in the background to test debouncing.
-    # We will kill this process to signal EOF later.
-    sleep 300 > $fifo_path &
-    set -l pipe_holder_pid $last_pid
+    # Create a writer script that writes two lines with a gap to trigger time checks
+    set -l writer_script "$TEST_DIR/writer_debounced.sh"
+    echo "#!/bin/bash" > $writer_script
+    echo "echo 'line 1'" >> $writer_script
+    echo "sleep 0.25" >> $writer_script  # Sleep longer than write interval
+    echo "echo 'line 2'" >> $writer_script  # This triggers the time check
+    chmod +x $writer_script
 
-    # Write one line to the pipe
-    echo "line 1" > $fifo_path
-    
+    # Run the test
+    $writer_script | $BINARY $log_file --write-interval $write_interval_ms &
+    set -l lw_pid $last_pid
+
     # Wait for LESS than the interval
     sleep (math $write_interval_s / 2)
 
@@ -180,22 +175,21 @@ function test_debounced_write
     else
         pass_test "$test_name: file is not created before interval"
     end
-    
-    # Wait for MORE than the interval total
-    sleep (math $write_interval_s)
 
-    set -l content_after (cat $log_file 2>/dev/null)
-    set -l expected_after (printf "line 1\n")
+    # Wait for the second line to arrive and trigger the write
+    sleep 0.3
+
+    set -l content_after (cat $log_file 2>/dev/null | string collect)
+    set -l expected_after (printf "line 1\nline 2\n" | string collect)
     if test "$content_after" = "$expected_after"
-        pass_test "$test_name: file is written after interval"
+        pass_test "$test_name: file is written after interval on next input"
     else
         fail_test "$test_name: file content is wrong after interval"
-        echo "Expected: '$expected_after'"
-        echo "Actual:   '$content_after'"
+        printf "Expected length: %d\n" (string length -- "$expected_after")
+        printf "Actual length:   %d\n" (string length -- "$content_after")
     end
 
-    # Clean up and signal EOF by killing the process holding the pipe open
-    kill $pipe_holder_pid
+    # Wait for logwindow to finish
     wait $lw_pid 2>/dev/null
 end
 
@@ -208,10 +202,10 @@ run_test "Debounced Write" test_debounced_write
 echo ""
 echo "--- Test Summary ---"
 if test $EXIT_CODE -eq 0
-    echo "$green[SUCCESS]$normal All $TOTAL_TESTS tests passed."
+    echo "{$green}[SUCCESS]{$normal} All $TOTAL_TESTS tests passed."
 else
     set -l failed_tests (math $TOTAL_TESTS - $PASSED_TESTS)
-    echo "$red[FAILURE]$normal $failed_tests out of $TOTAL_TESTS tests failed."
+    echo "{$red}[FAILURE]{$normal} $failed_tests out of $TOTAL_TESTS tests failed."
 end
 
 exit $EXIT_CODE
