@@ -74,12 +74,12 @@ function test_basic_truncation
     set -l max_size 15
 
     # With line-based truncation, "line 1\n" should be dropped.
-    set -l input "line 1\nline 2\nline 3\n"
-    set -l expected "line 2\nline 3\n"
-    set -l expected_size (echo -n -- $expected | wc -c)
+    set -l input (printf "line 1\nline 2\nline 3\n")
+    set -l expected (printf "line 2\nline 3\n")
+    set -l expected_size (echo -n -- "$expected" | wc -c)
 
     # The program waits for stdin to close before the final write
-    echo -n -- $input | $BINARY $log_file --max-size $max_size >/dev/null 2>&1
+    printf -- "$input" | $BINARY $log_file --max-size $max_size >/dev/null 2>&1
 
     if not test -f $log_file
         fail_test "$test_name: Log file was not created"
@@ -95,7 +95,7 @@ function test_basic_truncation
         echo "Actual:   '$actual'"
     end
 
-    set -l actual_size (echo -n -- $actual | wc -c)
+    set -l actual_size (echo -n -- "$actual" | wc -c)
     if test "$actual_size" -eq "$expected_size"
         pass_test "$test_name: size is correct"
     else
@@ -115,15 +115,18 @@ function test_immediate_mode
     $BINARY $log_file --immediate < $fifo_path &
     set -l lw_pid $last_pid
 
-    # Open the pipe for writing. The 'exec' keeps it open.
-    exec 3> $fifo_path
+    # Write to the pipe in a separate process. It will close the pipe when done.
+    begin
+        echo "line 1"
+        sleep 0.2 # Give writer time to send second line
+        echo "line 2"
+    end > $fifo_path &
 
-    # Write first line and check
-    echo "line 1" >&3
-    sleep 0.1 # Give logwindow time to process and write
+    # Give logwindow time to process the first line
+    sleep 0.1
     
     set -l content1 (cat $log_file 2>/dev/null)
-    set -l expected1 "line 1\n"
+    set -l expected1 (printf "line 1\n")
     if test "$content1" = "$expected1"
         pass_test "$test_name: writes first line immediately"
     else
@@ -132,12 +135,11 @@ function test_immediate_mode
         echo "Actual:   '$content1'"
     end
 
-    # Write second line and check again
-    echo "line 2" >&3
-    sleep 0.1
+    # Give logwindow time to process the second line
+    sleep 0.2
 
     set -l content2 (cat $log_file 2>/dev/null)
-    set -l expected2 "line 1\nline 2\n"
+    set -l expected2 (printf "line 1\nline 2\n")
     if test "$content2" = "$expected2"
         pass_test "$test_name: appends second line immediately"
     else
@@ -146,8 +148,7 @@ function test_immediate_mode
         echo "Actual:   '$content2'"
     end
 
-    # Close the pipe, which will cause logwindow to exit
-    exec 3>&-
+    # Wait for logwindow to finish (it exits when the writer closes the pipe)
     wait $lw_pid 2>/dev/null
 end
 
@@ -162,9 +163,15 @@ function test_debounced_write
     
     $BINARY $log_file --write-interval $write_interval_ms < $fifo_path &
     set -l lw_pid $last_pid
-    exec 3> $fifo_path
+    
+    # Keep the pipe open in the background to test debouncing.
+    # We will kill this process to signal EOF later.
+    sleep 300 > $fifo_path &
+    set -l pipe_holder_pid $last_pid
 
-    echo "line 1" >&3
+    # Write one line to the pipe
+    echo "line 1" > $fifo_path
+    
     # Wait for LESS than the interval
     sleep (math $write_interval_s / 2)
 
@@ -178,7 +185,7 @@ function test_debounced_write
     sleep (math $write_interval_s)
 
     set -l content_after (cat $log_file 2>/dev/null)
-    set -l expected_after "line 1\n"
+    set -l expected_after (printf "line 1\n")
     if test "$content_after" = "$expected_after"
         pass_test "$test_name: file is written after interval"
     else
@@ -187,7 +194,8 @@ function test_debounced_write
         echo "Actual:   '$content_after'"
     end
 
-    exec 3>&-
+    # Clean up and signal EOF by killing the process holding the pipe open
+    kill $pipe_holder_pid
     wait $lw_pid 2>/dev/null
 end
 
