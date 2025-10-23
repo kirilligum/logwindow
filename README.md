@@ -69,11 +69,11 @@ sudo cp logwindow /usr/local/bin/
 ### Basic usage
 
 ```bash
-# Keep last 8000 bytes of logs (default)
+# Keep last 10KB of logs (default)
 yarn dev 2>&1 | logwindow yarn-dev.log &
 
-# Custom buffer size
-firebase emulators:start 2>&1 | logwindow firebase.log --max-size 16000 &
+# Custom buffer size (20KB)
+firebase emulators:start 2>&1 | logwindow firebase.log --max-size 20000 &
 ```
 
 ### Command-line options
@@ -82,20 +82,25 @@ firebase emulators:start 2>&1 | logwindow firebase.log --max-size 16000 &
 logwindow <logfile> [options]
 
 Options:
-  --max-size <bytes>        Maximum log size in bytes (default: 8000)
+  --max-size <bytes>        Maximum log size in bytes (default: 10000)
   --write-interval <ms>     Write interval in milliseconds (default: 1000)
   --immediate               Write immediately on every line (ignores interval)
+  --atomic-writes           Use atomic write-then-rename (POSIX only)
   --help                    Show help message
 ```
+
+**New in v1.1.0:**
+- `--atomic-writes`: Writes to a temporary file then atomically renames it over the target. This prevents readers from seeing partial writes but may cause `tail -f` to stick to the old file (use `tail -F` instead).
+- Default buffer size increased to 10KB (was 8KB) for better context coverage.
 
 ### Examples
 
 ```bash
-# Default: 8KB buffer, write every 1 second
+# Default: 10KB buffer, write every 1 second
 npm run dev 2>&1 | logwindow dev.log &
 
-# Larger buffer for more context (16KB)
-npm run dev 2>&1 | logwindow dev.log --max-size 16000 &
+# Larger buffer for more context (20KB)
+npm run dev 2>&1 | logwindow dev.log --max-size 20000 &
 
 # Faster updates (every 500ms)
 npm run dev 2>&1 | logwindow dev.log --write-interval 500 &
@@ -231,11 +236,11 @@ Add to `~/.config/fish/config.fish`:
 ```fish
 # Basic function
 function dev-logs
-    # Start with truncated logs
-    yarn dev 2>&1 | logwindow yarn-dev.log --max-size 8000 &
-    firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
+    # Start with truncated logs (10KB default)
+    yarn dev 2>&1 | logwindow yarn-dev.log &
+    firebase emulators:start 2>&1 | logwindow firebase.log &
 
-    echo "Logs are being truncated to 8KB:"
+    echo "Logs are being truncated to 10KB:"
     echo "  yarn-dev.log"
     echo "  firebase.log"
     echo ""
@@ -245,10 +250,10 @@ end
 # With error filtering
 function dev-logs-errors
     # Only save errors and warnings with context
-    yarn dev 2>&1 | grep -B 2 -A 5 -E "(Error|Warning)" | logwindow dev-errors.log --max-size 4000 &
-    firebase emulators:start 2>&1 | grep -B 2 -A 5 "ERROR" | logwindow firebase-errors.log --max-size 4000 &
+    yarn dev 2>&1 | grep -B 2 -A 5 -E "(Error|Warning)" | logwindow dev-errors.log &
+    firebase emulators:start 2>&1 | grep -B 2 -A 5 "ERROR" | logwindow firebase-errors.log &
 
-    echo "Capturing only errors with context:"
+    echo "Capturing only errors with context (10KB default):"
     echo "  dev-errors.log"
     echo "  firebase-errors.log"
 end
@@ -261,10 +266,10 @@ Add to `~/.bashrc` or `~/.zshrc`:
 ```bash
 # Basic function
 dev-logs() {
-    yarn dev 2>&1 | logwindow yarn-dev.log --max-size 8000 &
-    firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
+    yarn dev 2>&1 | logwindow yarn-dev.log &
+    firebase emulators:start 2>&1 | logwindow firebase.log &
 
-    echo "Logs are being truncated to 8KB:"
+    echo "Logs are being truncated to 10KB:"
     echo "  yarn-dev.log"
     echo "  firebase.log"
     echo ""
@@ -274,10 +279,10 @@ dev-logs() {
 # With error filtering
 dev-logs-errors() {
     # Only save errors and warnings with context
-    yarn dev 2>&1 | grep -B 2 -A 5 -E "(Error|Warning)" | logwindow dev-errors.log --max-size 4000 &
-    firebase emulators:start 2>&1 | grep -B 2 -A 5 "ERROR" | logwindow firebase-errors.log --max-size 4000 &
+    yarn dev 2>&1 | grep -B 2 -A 5 -E "(Error|Warning)" | logwindow dev-errors.log &
+    firebase emulators:start 2>&1 | grep -B 2 -A 5 "ERROR" | logwindow firebase-errors.log &
 
-    echo "Capturing only errors with context:"
+    echo "Capturing only errors with context (10KB default):"
     echo "  dev-errors.log"
     echo "  firebase-errors.log"
 }
@@ -285,18 +290,31 @@ dev-logs-errors() {
 
 ## How it works
 
-1. **Reads from stdin** line-by-line
-2. **Appends to buffer** in memory
-3. **Truncates buffer** when it exceeds `--max-size` (keeps last N bytes)
-4. **Writes to file** at specified interval or immediately
-5. **Continues** until stdin closes
+1. **Reads from stdin** line-by-line using efficient poll-based I/O (POSIX) or getline (fallback)
+2. **Appends to buffer** in memory using a deque-based structure for O(1) operations
+3. **Truncates buffer** when it exceeds `--max-size` (keeps last N bytes, preserves line boundaries)
+4. **Writes to file** via a dedicated writer thread with time-driven flushes
+5. **Continues** until stdin closes or receives SIGINT/SIGTERM
+6. **Performs final flush** before exiting to ensure no data loss
 
 ### Write modes
 
-| Mode                    | Updates    | Best for                             |
-| ----------------------- | ---------- | ------------------------------------ |
-| **Debounced** (default) | Every N ms | Normal development, reduces I/O      |
-| **Immediate**           | Every line | Real-time debugging, low-volume logs |
+| Mode                    | Updates                   | Best for                             |
+| ----------------------- | ------------------------- | ------------------------------------ |
+| **Debounced** (default) | Every N ms (time-driven)  | Normal development, reduces I/O      |
+| **Immediate**           | Every line                | Real-time debugging, low-volume logs |
+
+**Important:** In debounced mode, the file is updated every N milliseconds even when input is idle (new in v1.1.0). This ensures you always see recent logs within the configured interval.
+
+### Key improvements in v1.1.0
+
+- **Time-driven flushes**: Debounced mode now writes during idle periods, ensuring logs appear within the configured interval
+- **Efficient file I/O**: File is opened once and reused (no reopen/close per write)
+- **Graceful signal handling**: SIGINT/SIGTERM cause prompt, clean shutdown with final flush (POSIX systems)
+- **Thread-safe architecture**: Dedicated writer thread with mutex-protected buffer
+- **Atomic writes** (optional): Use `--atomic-writes` for write-then-rename semantics
+- **Overlong line protection**: Lines exceeding max-size are dropped entirely to preserve memory and line-based semantics
+- **CRLF normalization**: Windows-style line endings are automatically converted to Unix format
 
 ## Use cases
 
@@ -304,7 +322,7 @@ dev-logs-errors() {
 
 ```bash
 # Claude Code background tasks
-yarn dev 2>&1 | logwindow dev.log --max-size 8000 &
+yarn dev 2>&1 | logwindow dev.log &
 
 # Now Claude can read the log without context overflow
 ```
@@ -336,8 +354,8 @@ Claude Code can read log files to debug issues, but long logs cause context over
 
 ```bash
 # 1. Start your services with logwindow
-firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
-yarn dev 2>&1 | logwindow dev-server.log --max-size 8000 &
+firebase emulators:start 2>&1 | logwindow firebase.log &
+yarn dev 2>&1 | logwindow dev-server.log &
 
 # 2. In Claude Code, ask it to work on your code
 # "Add a new cloud function to handle user registration and write tests"
@@ -360,8 +378,8 @@ For even better results, filter logs to show only errors with context:
 
 ```bash
 # 1. Start services with error-only logs
-firebase emulators:start 2>&1 | grep -B 2 -A 5 "ERROR" | logwindow firebase-errors.log --max-size 4000 &
-yarn dev 2>&1 | grep -B 2 -A 5 -E "(Error|Warning|Failed)" | logwindow dev-errors.log --max-size 4000 &
+firebase emulators:start 2>&1 | grep -B 2 -A 5 "ERROR" | logwindow firebase-errors.log &
+yarn dev 2>&1 | grep -B 2 -A 5 -E "(Error|Warning|Failed)" | logwindow dev-errors.log &
 
 # 2. Now Claude only sees errors, not verbose debug output
 # This leaves more room in the context window for your actual code!
@@ -378,12 +396,12 @@ yarn dev 2>&1 | grep -B 2 -A 5 -E "(Error|Warning|Failed)" | logwindow dev-error
 
 ```fish
 function start-dev-with-logs
-    firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
-    yarn dev 2>&1 | logwindow dev-server.log --max-size 8000 &
+    firebase emulators:start 2>&1 | logwindow firebase.log &
+    yarn dev 2>&1 | logwindow dev-server.log &
 
     echo "✓ Started with log windows:"
-    echo "  firebase.log (8KB window)"
-    echo "  dev-server.log (8KB window)"
+    echo "  firebase.log (10KB window)"
+    echo "  dev-server.log (10KB window)"
     echo ""
     echo "Tell Claude Code: 'Check firebase.log for errors'"
 end
@@ -400,12 +418,12 @@ end
 
 ```bash
 start-dev-with-logs() {
-    firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
-    yarn dev 2>&1 | logwindow dev-server.log --max-size 8000 &
+    firebase emulators:start 2>&1 | logwindow firebase.log &
+    yarn dev 2>&1 | logwindow dev-server.log &
 
     echo "✓ Started with log windows:"
-    echo "  firebase.log (8KB window)"
-    echo "  dev-server.log (8KB window)"
+    echo "  firebase.log (10KB window)"
+    echo "  dev-server.log (10KB window)"
     echo ""
     echo "Tell Claude Code: 'Check firebase.log for errors'"
 }
@@ -459,7 +477,7 @@ Aider automatically re-reads files before each LLM call, making it perfect for t
 
 ```bash
 # Terminal 1: Start emulator with logwindow
-firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
+firebase emulators:start 2>&1 | logwindow firebase.log &
 
 # Terminal 2: Start aider
 aider
@@ -487,7 +505,7 @@ Save context by only tracking errors:
 
 ```bash
 # Terminal 1: Only capture errors with context
-firebase emulators:start 2>&1 | grep -B 2 -A 10 "ERROR" | logwindow firebase-errors.log --max-size 4000 &
+firebase emulators:start 2>&1 | grep -B 2 -A 10 "ERROR" | logwindow firebase-errors.log &
 
 # Terminal 2: Aider session
 aider
@@ -521,8 +539,8 @@ aider
 
 ```bash
 # Start multiple services
-firebase emulators:start 2>&1 | logwindow firebase.log --max-size 8000 &
-yarn dev 2>&1 | logwindow dev-server.log --max-size 8000 &
+firebase emulators:start 2>&1 | logwindow firebase.log &
+yarn dev 2>&1 | logwindow dev-server.log &
 
 # In aider, add all relevant files
 /add src/app.js
@@ -539,8 +557,8 @@ yarn dev 2>&1 | logwindow dev-server.log --max-size 8000 &
 If logs take too much context:
 
 ```bash
-# Option 1: Smaller log window
-logwindow firebase.log --max-size 4000
+# Option 1: Smaller log window (5KB)
+logwindow firebase.log --max-size 5000
 
 # Option 2: Remove log file when not needed
 /drop firebase.log
@@ -597,19 +615,20 @@ tail -f firebase.log
 
 | Use case            | `--max-size` | `--write-interval`   |
 | ------------------- | ------------ | -------------------- |
-| Claude Code (free)  | 8000         | 1000                 |
-| Claude Pro/Extended | 16000-32000  | 1000                 |
-| Aider               | 4000-8000    | 1000                 |
-| Real-time debugging | 8000         | 500 or `--immediate` |
-| Low I/O systems     | 16000        | 2000                 |
-| High-volume logs    | 32000+       | 500                  |
+| Claude Code (free)  | 10000        | 1000                 |
+| Claude Pro/Extended | 20000-32000  | 1000                 |
+| Aider               | 10000        | 1000                 |
+| Real-time debugging | 10000        | 500 or `--immediate` |
+| Low I/O systems     | 20000        | 2000                 |
+| High-volume logs    | 40000+       | 500                  |
 
 ## Performance
 
 - **Memory usage**: ~2x buffer size (typically <100KB)
-- **CPU usage**: Negligible (<0.1% on modern systems)
-- **Disk I/O**: Configurable (1 write/second by default)
-- **Throughput**: Handles 10,000+ lines/second easily
+- **CPU usage**: Near-zero when idle (<1%), efficient with high-volume logs
+- **Disk I/O**: Exactly 1 write per interval in debounced mode (no wasteful reopen/close)
+- **Throughput**: Handles 10,000+ lines/second easily with immediate mode
+- **File operations**: O(1) amortized append/drop operations using deque-based buffer
 
 ## Comparison to alternatives
 
@@ -633,6 +652,20 @@ MIT License - see LICENSE file for details
 Created for developers using **Claude Code, Aider, and other AI coding assistants** who need to keep Firebase emulator logs, dev server logs, and test output within the AI's context window.
 
 ## Changelog
+
+### v1.1.0
+
+- **Larger default window**: Increased from 8KB to 10KB for better context coverage
+- **Time-driven flushes**: Debounced mode now flushes during idle periods (no longer waits for new input)
+- **Efficient file I/O**: Open-once strategy with seekp and resize_file (eliminates reopen overhead)
+- **POSIX signal handling**: Self-pipe trick enables prompt termination on SIGINT/SIGTERM with final flush
+- **Thread-safe writer**: Dedicated writer thread with condition variables for reliable time-driven flushes
+- **Atomic writes**: New `--atomic-writes` flag for write-then-rename semantics (POSIX)
+- **Deque-based buffer**: O(1) amortized operations for append/drop (previously O(n) with string erase)
+- **Overlong line protection**: Lines exceeding max-size are dropped to prevent memory overflow
+- **CRLF normalization**: Automatic conversion of Windows line endings
+- **Error rate-limiting**: File I/O errors are throttled to prevent log spam
+- **Improved tests**: Added tests for time-driven flush, signals, overlong lines, CRLF, and atomic writes
 
 ### v1.0.0
 

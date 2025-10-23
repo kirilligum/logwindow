@@ -150,41 +150,45 @@ function test_immediate_mode
 end
 
 function test_debounced_write
-    set -l test_name "Debounced write"
+    set -l test_name "Debounced write (time-driven flush)"
     set -l log_file "$TEST_DIR/debounced.log"
     set -l write_interval_ms 200
     set -l write_interval_s (math $write_interval_ms / 1000)
 
-    # Create a writer script that writes two lines with a gap to trigger time checks
+    # Create a writer script that writes one line and then keeps stdin open
     set -l writer_script "$TEST_DIR/writer_debounced.sh"
     echo "#!/bin/bash" > $writer_script
     echo "echo 'line 1'" >> $writer_script
-    echo "sleep 0.25" >> $writer_script  # Sleep longer than write interval
-    echo "echo 'line 2'" >> $writer_script  # This triggers the time check
+    echo "sleep 0.4" >> $writer_script  # Keep stdin open past the interval
     chmod +x $writer_script
 
     # Run the test
     $writer_script | $BINARY $log_file --write-interval $write_interval_ms &
     set -l lw_pid $last_pid
 
-    # Wait for LESS than the interval
+    # Wait for LESS than the interval - file should not have content yet
     sleep (math $write_interval_s / 2)
 
+    set -l size_before 0
     if test -f $log_file
-        fail_test "$test_name: file was created before interval expired"
-    else
-        pass_test "$test_name: file is not created before interval"
+        set size_before (stat -f%z $log_file 2>/dev/null; or stat -c%s $log_file 2>/dev/null; or echo 0)
     end
 
-    # Wait for the second line to arrive and trigger the write
-    sleep 0.3
+    if test $size_before -eq 0
+        pass_test "$test_name: file has no content before interval"
+    else
+        fail_test "$test_name: file has content ($size_before bytes) before interval expired"
+    end
+
+    # Wait past the interval (time-driven flush should occur even without new input)
+    sleep 0.2
 
     set -l content_after (cat $log_file 2>/dev/null | string collect)
-    set -l expected_after (printf "line 1\nline 2\n" | string collect)
+    set -l expected_after (printf "line 1\n" | string collect)
     if test "$content_after" = "$expected_after"
-        pass_test "$test_name: file is written after interval on next input"
+        pass_test "$test_name: file is written after interval during idle (time-driven flush)"
     else
-        fail_test "$test_name: file content is wrong after interval"
+        fail_test "$test_name: time-driven flush did not work"
         printf "Expected length: %d\n" (string length -- "$expected_after")
         printf "Actual length:   %d\n" (string length -- "$content_after")
     end
@@ -193,10 +197,126 @@ function test_debounced_write
     wait $lw_pid 2>/dev/null
 end
 
+function test_signal_termination
+    set -l test_name "Signal termination (SIGINT)"
+    set -l log_file "$TEST_DIR/signal.log"
+
+    # Create a simple input script
+    set -l input_script "$TEST_DIR/signal_input.sh"
+    echo "#!/bin/bash" > $input_script
+    echo "echo 'test line'" >> $input_script
+    echo "sleep 5" >> $input_script  # Keep stdin open
+    chmod +x $input_script
+
+    # Use timeout command to send SIGINT after 0.3s
+    # This is simpler and more reliable than tracking PIDs
+    $input_script | timeout --signal=INT 0.3 $BINARY $log_file --write-interval 200 2>/dev/null
+    set -l exit_code $status
+
+    # timeout exits with 124 if it had to kill the process, 0 if process exited on its own
+    # Our program should exit gracefully with 0 on SIGINT
+    if test $exit_code -eq 0 -o $exit_code -eq 124
+        pass_test "$test_name: process responded to SIGINT and exited"
+    else
+        fail_test "$test_name: unexpected exit code $exit_code"
+    end
+
+    # Check that file has the content (final flush occurred)
+    set -l content (cat $log_file 2>/dev/null | string collect)
+    set -l expected (printf "test line\n" | string collect)
+    if test "$content" = "$expected"
+        pass_test "$test_name: final flush occurred before exit"
+    else
+        fail_test "$test_name: final flush did not write content correctly"
+        printf "Expected: 'test line\\n'\n"
+        printf "Actual:   '%s'\n" "$content"
+    end
+end
+
+function test_overlong_lines
+    set -l test_name "Overlong line dropping"
+    set -l log_file "$TEST_DIR/overlong.log"
+    set -l max_size 50
+
+    # Create input: normal line, overlong line, normal line
+    # Use a script to generate the input reliably
+    set -l input_script "$TEST_DIR/input_overlong.sh"
+    echo "#!/bin/bash" > $input_script
+    echo "echo 'line 1'" >> $input_script
+    echo "python3 -c \"print('x'*60)\"" >> $input_script
+    echo "echo 'line 2'" >> $input_script
+    chmod +x $input_script
+
+    $input_script | $BINARY $log_file --max-size $max_size >/dev/null 2>&1
+
+    set -l content (cat $log_file 2>/dev/null | string collect)
+    set -l expected (printf "line 1\nline 2\n" | string collect)
+
+    if test "$content" = "$expected"
+        pass_test "$test_name: overlong line was dropped, normal lines preserved"
+    else
+        fail_test "$test_name: content mismatch"
+        printf "Expected: 'line 1\\nline 2\\n'\n"
+        printf "Actual length: %d\n" (string length -- "$content")
+    end
+end
+
+function test_crlf_normalization
+    set -l test_name "CRLF normalization"
+    set -l log_file "$TEST_DIR/crlf.log"
+
+    # Create input with CRLF line endings
+    printf "line 1\r\nline 2\r\nline 3\n" | $BINARY $log_file >/dev/null 2>&1
+
+    set -l content (cat $log_file 2>/dev/null | string collect)
+    set -l expected (printf "line 1\nline 2\nline 3\n" | string collect)
+
+    if test "$content" = "$expected"
+        pass_test "$test_name: CRLF normalized to LF"
+    else
+        fail_test "$test_name: CRLF normalization failed"
+        printf "Expected: 'line 1\\nline 2\\nline 3\\n'\n"
+        printf "Actual:   '%s'\n" (echo -n "$content" | od -c)
+    end
+end
+
+function test_atomic_writes
+    set -l test_name "Atomic writes"
+    set -l log_file "$TEST_DIR/atomic.log"
+
+    # Simple test: verify --atomic-writes flag works without error
+    printf "line 1\nline 2\n" | $BINARY $log_file --atomic-writes >/dev/null 2>&1
+
+    if not test -f $log_file
+        fail_test "$test_name: Log file was not created"
+        return
+    end
+
+    set -l content (cat $log_file 2>/dev/null | string collect)
+    set -l expected (printf "line 1\nline 2\n" | string collect)
+
+    if test "$content" = "$expected"
+        pass_test "$test_name: atomic writes produced correct output"
+    else
+        fail_test "$test_name: content mismatch with atomic writes"
+    end
+
+    # Verify temp file was cleaned up
+    if test -f "$log_file.tmp"
+        fail_test "$test_name: temp file was not cleaned up"
+    else
+        pass_test "$test_name: temp file was cleaned up"
+    end
+end
+
 # --- Run tests ---
 run_test "Basic Truncation" test_basic_truncation
 run_test "Immediate Mode" test_immediate_mode
 run_test "Debounced Write" test_debounced_write
+run_test "Signal Termination" test_signal_termination
+run_test "Overlong Lines" test_overlong_lines
+run_test "CRLF Normalization" test_crlf_normalization
+run_test "Atomic Writes" test_atomic_writes
 
 # --- Summary ---
 echo ""

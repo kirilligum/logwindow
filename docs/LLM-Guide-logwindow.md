@@ -25,12 +25,15 @@ What to ask the user (when context is insufficient)
 - Provide the exact command used (including flags) and the exact log file path(s).
 
 Canonical usage patterns
-- Default rolling log:
-  - command 2>&1 | logwindow app.log --max-size 8000 --write-interval 1000 &
+- Default rolling log (10KB window):
+  - command 2>&1 | logwindow app.log &
+  - Explicit: command 2>&1 | logwindow app.log --max-size 10000 --write-interval 1000 &
 - Immediate (per-line) updates:
   - command 2>&1 | logwindow app.log --immediate &
 - Filter first, then capture (recommended for LLM context):
-  - command 2>&1 | grep -E "(ERROR|WARN|FATAL)" | logwindow issues.log --max-size 8000 &
+  - command 2>&1 | grep -E "(ERROR|WARN|FATAL)" | logwindow issues.log &
+- Larger window for complex errors (20KB):
+  - command 2>&1 | logwindow app.log --max-size 20000 &
 
 Caveats
 - Max on-disk staleness equals write-interval in debounced mode; use --immediate for step-by-step debugging.
