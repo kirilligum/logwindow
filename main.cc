@@ -39,8 +39,8 @@ struct Config {
 void printUsage(const char *progName) {
   std::cerr << "Usage: " << progName << " <logfile> [options]\n"
             << "Options:\n"
-            << "  --max-size <bytes>        Maximum log size in bytes "
-               "(default: 10000)\n"
+            << "  --max-size <size>         Maximum log size (default: 10000)\n"
+            << "                            Supports suffixes: k (1000), M (1000000), G (1000000000)\n"
             << "  --write-interval <ms>     Write interval in milliseconds "
                "(default: 1000)\n"
             << "  --immediate               Write immediately on every line "
@@ -51,20 +51,70 @@ void printUsage(const char *progName) {
             << "\nExamples:\n"
             << "  " << progName << " app.log\n"
             << "  " << progName
-            << " app.log --max-size 16000 --write-interval 500\n"
-            << "  " << progName << " app.log --immediate\n"
+            << " app.log --max-size 10k --write-interval 500\n"
+            << "  " << progName << " app.log --max-size 1M --immediate\n"
             << "  " << progName << " app.log --atomic-writes\n";
+}
+
+// Parse human-readable size (e.g., "10k", "1M", "500")
+size_t parseSize(const std::string &str) {
+  if (str.empty()) {
+    throw std::invalid_argument("Empty size string");
+  }
+
+  size_t pos = 0;
+  unsigned long long num = std::stoull(str, &pos);
+
+  if (num == 0) {
+    throw std::invalid_argument("Size must be > 0");
+  }
+
+  // Check for suffix
+  if (pos < str.length()) {
+    char suffix = str[pos];
+    switch (suffix) {
+    case 'k':
+    case 'K':
+      num *= 1000;
+      break;
+    case 'm':
+    case 'M':
+      num *= 1000 * 1000;
+      break;
+    case 'g':
+    case 'G':
+      num *= 1000 * 1000 * 1000;
+      break;
+    default:
+      throw std::invalid_argument("Invalid size suffix (use k, M, or G)");
+    }
+    pos++;
+  }
+
+  // Ensure we consumed the entire string
+  if (pos != str.length()) {
+    throw std::invalid_argument("Invalid size format");
+  }
+
+  return static_cast<size_t>(num);
 }
 
 Config parseArgs(int argc, char *argv[]) {
   Config config;
 
+  // Check for --help before requiring logfile
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--help" || arg == "-h") {
+      printUsage(argv[0]);
+      std::exit(0);
+    }
+  }
+
   if (argc < 2) {
     printUsage(argv[0]);
     std::exit(1);
   }
-
-  config.logFile = argv[1];
 
   auto requireValue = [&](int &i, const char *flag) -> const char * {
     if (i + 1 >= argc || argv[i + 1][0] == '-') {
@@ -75,7 +125,9 @@ Config parseArgs(int argc, char *argv[]) {
     return argv[++i];
   };
 
-  for (int i = 2; i < argc; ++i) {
+  // Parse all arguments, allowing flexible ordering
+  bool foundLogFile = false;
+  for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
 
     if (arg == "--help" || arg == "-h") {
@@ -84,14 +136,9 @@ Config parseArgs(int argc, char *argv[]) {
     } else if (arg == "--max-size") {
       const char *v = requireValue(i, "--max-size");
       try {
-        auto val = std::stoull(v);
-        if (val == 0) {
-          std::cerr << "Error: --max-size must be > 0\n";
-          std::exit(1);
-        }
-        config.maxSize = static_cast<size_t>(val);
-      } catch (...) {
-        std::cerr << "Error: Invalid --max-size\n";
+        config.maxSize = parseSize(v);
+      } catch (const std::exception &e) {
+        std::cerr << "Error: Invalid --max-size: " << e.what() << "\n";
         std::exit(1);
       }
     } else if (arg == "--write-interval") {
@@ -111,11 +158,27 @@ Config parseArgs(int argc, char *argv[]) {
       config.immediate = true;
     } else if (arg == "--atomic-writes") {
       config.atomicWrites = true;
-    } else {
+    } else if (arg[0] == '-') {
       std::cerr << "Unknown option: " << arg << '\n';
       printUsage(argv[0]);
       std::exit(1);
+    } else {
+      // This is the logfile (first non-option argument)
+      if (!foundLogFile) {
+        config.logFile = arg;
+        foundLogFile = true;
+      } else {
+        std::cerr << "Error: Multiple logfile arguments provided\n";
+        printUsage(argv[0]);
+        std::exit(1);
+      }
     }
+  }
+
+  if (!foundLogFile) {
+    std::cerr << "Error: No logfile specified\n\n";
+    printUsage(argv[0]);
+    std::exit(1);
   }
 
   return config;
